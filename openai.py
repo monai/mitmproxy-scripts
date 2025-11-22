@@ -7,8 +7,7 @@ import yaml
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from jinja2.exceptions import TemplateError
 from mitmproxy import contentviews, ctx
-from mitmproxy.http import HTTPFlow
-from mitmproxy.http import Request as HTTPRequest
+from mitmproxy.http import HTTPFlow, Request, Response
 from pydantic import BaseModel
 
 
@@ -56,7 +55,7 @@ class Tool(BaseModel):
     function: Function
 
 
-class Request(BaseModel):
+class ChatCompletionsRequest(BaseModel):
     messages: list[Message]
     model: str
     temperature: float
@@ -64,9 +63,54 @@ class Request(BaseModel):
     tools: list[dict[str, Any]]
 
 
+class ToolCallFunction(BaseModel):
+    arguments: str
+    name: str | None = None
+
+
+class ToolCall(BaseModel):
+    index: int
+    function: ToolCallFunction
+    id: str | None = None
+    type: str | None = None
+
+
+class Delta(BaseModel):
+    content: str | None = None
+    refusal: str | None = None
+    role: str | None = None
+    tool_calls: list[ToolCall] | None = None
+    reasoning_content: str | None = None
+
+
+class Choice(BaseModel):
+    delta: Delta
+    finish_reason: str | None = None
+    index: int
+    logprobs: dict[str, Any] | None = None
+
+
+class Usage(BaseModel):
+    completion_tokens: int
+    prompt_tokens: int
+    total_tokens: int
+    completion_token_details: dict[str, Any]
+    prompt_token_details: dict[str, Any]
+
+
+class Chunk(BaseModel):
+    choices: list[Choice]
+    created: int
+    id: str
+    model: str
+    object: str
+    service_tier: str | None = None
+    usage: dict[str, Any] | None = None
+
+
 class OpenAIRequest(contentviews.Contentview):
     def prettify(self, data: bytes, metadata: contentviews.Metadata) -> str:
-        request = Request.model_validate_json(data)
+        request = ChatCompletionsRequest.model_validate_json(data)
 
         out = yaml.dump(
             request.model_dump(),
@@ -81,7 +125,7 @@ class OpenAIRequest(contentviews.Contentview):
         if not isinstance(metadata.flow, HTTPFlow):
             return 0
 
-        if not isinstance(metadata.http_message, HTTPRequest):
+        if not isinstance(metadata.http_message, Request):
             return 0
 
         if (
@@ -103,7 +147,7 @@ def raise_exception(msg: str) -> None:
 
 class OpenAIRequestJinja(contentviews.Contentview):
     def prettify(self, data: bytes, metadata: contentviews.Metadata) -> str:
-        request = Request.model_validate_json(data)
+        request = ChatCompletionsRequest.model_validate_json(data)
 
         request_data = request.model_dump()
 
@@ -122,7 +166,7 @@ class OpenAIRequestJinja(contentviews.Contentview):
         if not isinstance(metadata.flow, HTTPFlow):
             return 0
 
-        if not isinstance(metadata.http_message, HTTPRequest):
+        if not isinstance(metadata.http_message, Request):
             return 0
 
         if (
@@ -131,6 +175,51 @@ class OpenAIRequestJinja(contentviews.Contentview):
             and ctx.options.jinja
         ):
             return 3
+        else:
+            return 0
+
+
+class OpenAIResponseStreaming(contentviews.Contentview):
+    def prettify(self, data: bytes, metadata: contentviews.Metadata) -> str:
+        lines = data.decode("utf-8").splitlines()
+
+        chunks = []
+        for line in lines:
+            line_data = line[6:]
+            if line_data.startswith("[DONE]"):
+                break
+
+            if len(line_data) == 0:
+                continue
+
+            try:
+                chunk: Chunk = Chunk.model_validate_json(line_data)
+            except Exception as e:
+                return str(e)
+
+            chunks.append(chunk.model_dump(exclude_unset=True))
+
+        res = yaml.dump(
+            chunks,
+            Dumper=MyDumper,
+            sort_keys=False,
+            allow_unicode=True,
+        )
+
+        return res
+
+    def render_priority(self, data: bytes, metadata: contentviews.Metadata) -> float:
+        if not isinstance(metadata.flow, HTTPFlow):
+            return 0
+
+        if not isinstance(metadata.http_message, Response):
+            return 0
+
+        if (
+            metadata.content_type == "text/event-stream"
+            and metadata.flow.request.path.endswith("/v1/chat/completions")
+        ):
+            return 2
         else:
             return 0
 
@@ -157,6 +246,7 @@ class OpenAI:
 
 contentviews.add(OpenAIRequest)
 contentviews.add(OpenAIRequestJinja)
+contentviews.add(OpenAIResponseStreaming)
 
 addons = [
     OpenAI(),
