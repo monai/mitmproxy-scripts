@@ -1,4 +1,6 @@
 import datetime
+import textwrap
+from pathlib import Path
 from typing import Any
 
 import yaml
@@ -23,9 +25,16 @@ class MyDumper(yaml.Dumper, MyEmitter):
 
 
 def str_presenter(dumper: yaml.Dumper, data: str):
-    if len(data.splitlines()) > 1:
-        return dumper.represent_scalar("tag:yaml.org,2002:str", data, style="|")
-    return dumper.represent_scalar("tag:yaml.org,2002:str", data)
+    lines = data.splitlines()
+
+    text = data
+    if ctx.options.wrap:
+        wrapped_lines = [textwrap.fill(line, ctx.options.wrap) for line in lines]
+        text = "\n".join(wrapped_lines)
+
+    style = "|" if len(lines) > 1 else None
+
+    return dumper.represent_scalar("tag:yaml.org,2002:str", text, style=style)
 
 
 yaml.add_representer(str, str_presenter)
@@ -55,7 +64,7 @@ class Request(BaseModel):
     tools: list[dict[str, Any]]
 
 
-class OpenAI(contentviews.Contentview):
+class OpenAIRequest(contentviews.Contentview):
     def prettify(self, data: bytes, metadata: contentviews.Metadata) -> str:
         request = Request.model_validate_json(data)
 
@@ -77,9 +86,9 @@ class OpenAI(contentviews.Contentview):
 
         if (
             metadata.content_type == "application/json"
-            and metadata.flow.request.path.endswith("completions")
+            and metadata.flow.request.path.endswith("/v1/chat/completions")
         ):
-            return 3
+            return 2
         else:
             return 0
 
@@ -92,30 +101,22 @@ def raise_exception(msg: str) -> None:
     raise TemplateError(msg)
 
 
-class OpenAIJinja(contentviews.Contentview):
+class OpenAIRequestJinja(contentviews.Contentview):
     def prettify(self, data: bytes, metadata: contentviews.Metadata) -> str:
         request = Request.model_validate_json(data)
 
         request_data = request.model_dump()
 
-        env = Environment(loader=FileSystemLoader("."), autoescape=select_autoescape())
+        env = Environment(
+            loader=FileSystemLoader(Path.cwd()), autoescape=select_autoescape()
+        )
 
         env.globals["strftime_now"] = strftime_now
         env.globals["raise_exception"] = raise_exception
 
-        template = env.get_template("unsloth-gpt-oss-20b.jinja")
+        template = env.get_template(ctx.options.jinja)
 
-        print(request_data["messages"])
-
-        try:
-            out = template.render(messages=request_data["messages"])
-        except Exception as e:
-            print(e)
-            return "Error: " + str(e)
-
-        print(out)
-
-        return out
+        return template.render(messages=request_data["messages"])
 
     def render_priority(self, data: bytes, metadata: contentviews.Metadata) -> float:
         if not isinstance(metadata.flow, HTTPFlow):
@@ -126,30 +127,37 @@ class OpenAIJinja(contentviews.Contentview):
 
         if (
             metadata.content_type == "application/json"
-            and metadata.flow.request.path.endswith("completions")
+            and metadata.flow.request.path.endswith("/v1/chat/completions")
+            and ctx.options.jinja
         ):
-            return 2
+            return 3
         else:
             return 0
 
 
-class Jinja:
+class OpenAI:
     def __init__(self):
         self.num = 0
 
     def load(self, loader):
         loader.add_option(
+            name="wrap",
+            typespec=int,
+            default=0,
+            help="Wrap text at N characters",
+        )
+
+        loader.add_option(
             name="jinja",
             typespec=str,
-            default=False,
+            default="",
             help="Use jinja template for chat",
         )
 
-    def response(self, flow):
-        if ctx.options.addheader:
-            self.num = self.num + 1
-            flow.response.headers["count"] = str(self.num)
 
+contentviews.add(OpenAIRequest)
+contentviews.add(OpenAIRequestJinja)
 
-contentviews.add(OpenAI)
-contentviews.add(OpenAIJinja)
+addons = [
+    OpenAI(),
+]
