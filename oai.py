@@ -8,6 +8,11 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 from jinja2.exceptions import TemplateError
 from mitmproxy import contentviews, ctx
 from mitmproxy.http import HTTPFlow, Request, Response
+from openai.types.chat.chat_completion_chunk import (
+    ChatCompletionChunk,
+    Choice,
+    ChoiceDelta,
+)
 from pydantic import BaseModel
 
 
@@ -63,49 +68,16 @@ class ChatCompletionsRequest(BaseModel):
     tools: list[dict[str, Any]]
 
 
-class ToolCallFunction(BaseModel):
-    arguments: str
-    name: str | None = None
-
-
-class ToolCall(BaseModel):
-    index: int
-    function: ToolCallFunction
-    id: str | None = None
-    type: str | None = None
-
-
-class Delta(BaseModel):
-    content: str | None = None
-    refusal: str | None = None
-    role: str | None = None
-    tool_calls: list[ToolCall] | None = None
+class LlamaCppChoiceDelta(ChoiceDelta):
     reasoning_content: str | None = None
 
 
-class Choice(BaseModel):
-    delta: Delta
-    finish_reason: str | None = None
-    index: int
-    logprobs: dict[str, Any] | None = None
+class LlamaCppChoice(Choice):
+    delta: LlamaCppChoiceDelta # pyright: ignore[reportIncompatibleVariableOverride]
 
 
-class Usage(BaseModel):
-    completion_tokens: int
-    prompt_tokens: int
-    total_tokens: int
-    completion_token_details: dict[str, Any]
-    prompt_token_details: dict[str, Any]
-
-
-class Chunk(BaseModel):
-    choices: list[Choice]
-    created: int
-    id: str
-    model: str
-    object: str
-    service_tier: str | None = None
-    usage: dict[str, Any] | None = None
+class LlamaCppChatCompletionChunk(ChatCompletionChunk):
+    choices: list[LlamaCppChoice] # pyright: ignore[reportIncompatibleVariableOverride]
 
 
 class OpenAIRequest(contentviews.Contentview):
@@ -184,6 +156,7 @@ class OpenAIResponseStreaming(contentviews.Contentview):
         lines = data.decode("utf-8").splitlines()
 
         chunks = []
+        dialog = []
         for line in lines:
             line_data = line[6:]
             if line_data.startswith("[DONE]"):
@@ -193,14 +166,40 @@ class OpenAIResponseStreaming(contentviews.Contentview):
                 continue
 
             try:
-                chunk: Chunk = Chunk.model_validate_json(line_data)
+                chunk = LlamaCppChatCompletionChunk.model_validate_json(line_data)
             except Exception as e:
                 return str(e)
 
+            if len(chunk.choices) > 0:
+                first_choice = chunk.choices[0]
+
+                if first_choice.delta.role is not None:
+                    item = {
+                        "role": first_choice.delta.role,
+                        "content": [],
+                        "reasoning_content": [],
+                    }
+                    dialog.append(item)
+
+                if first_choice.delta.content is not None:
+                    dialog[-1]["content"].append(first_choice.delta.content)
+
+                if first_choice.delta.reasoning_content is not None:
+                    dialog[-1]["reasoning_content"].append(first_choice.delta.reasoning_content)
+
             chunks.append(chunk.model_dump(exclude_unset=True))
 
+        for item in dialog:
+            item["content"] = "".join(item["content"])
+            item["reasoning_content"] = "".join(item["reasoning_content"])
+
+        out = {
+            "dialog": dialog,
+            "chunks": chunks,
+        }
+
         res = yaml.dump(
-            chunks,
+            out,
             Dumper=MyDumper,
             sort_keys=False,
             allow_unicode=True,
