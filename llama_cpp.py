@@ -81,8 +81,10 @@ class ChatCompletionsRequest(BaseModel):
 class LlamaCppChoiceDelta(ChoiceDelta):
     reasoning_content: str | None = None
 
+
 class LlamaCppChatCompletionMessage(ChatCompletionMessage):
     reasoning_content: str | None = None
+
 
 class LlamaCppChoice(Choice):
     message: LlamaCppChatCompletionMessage
@@ -116,64 +118,76 @@ class OpenAIContentview(contentviews.Contentview):
         stream = Stream(cast_to=ChatCompletionChunk, response=x_response, client=openai)
 
         chunks = []
-        contents = []
-        choices: dict[int, LlamaCppChoice] = {}
+        choices: list[LlamaCppChoice] = []
 
         for chunk in stream:
             chunks.append(chunk.model_dump(exclude_unset=True))
 
             for choice in chunk.choices:
-                if choice.index not in choices:
-                    # TODO: check if role != "assistant"
+                try:
+                    assembled_choice = choices[choice.index]
+                except IndexError:
+                    if choice.index != len(choices):
+                        msg = f"choice index is out of order: {choice.index}"
+                        raise ValueError(msg)
+
+                    if choice.delta.role != "assistant":
+                        msg = f"unexpected role: {choice.delta.role}"
+                        raise ValueError(msg)
+
                     message = LlamaCppChatCompletionMessage(role="assistant")
                     assembled_choice = LlamaCppChoice(
                         finish_reason="stop", index=choice.index, message=message
                     )
-                    choices[choice.index] = assembled_choice
 
-                assembled_choice = choices[choice.index]
+                    choices.append(assembled_choice)
 
                 if choice.finish_reason is not None:
                     assembled_choice.finish_reason = choice.finish_reason
 
                 delta = LlamaCppChoiceDelta.model_validate(choice.delta.model_dump())
+
                 if delta.content is not None:
-                    if assembled_choice.message.content is None:
-                        assembled_choice.message.content = delta.content
-                    else:
-                        assembled_choice.message.content += delta.content
+                    assembled_choice.message.content = (
+                        assembled_choice.message.content or ""
+                    ) + delta.content
 
                 if delta.reasoning_content is not None:
-                    if assembled_choice.message.reasoning_content is None:
-                        assembled_choice.message.reasoning_content = delta.reasoning_content
-                    else:
-                        assembled_choice.message.reasoning_content += delta.reasoning_content
+                    assembled_choice.message.reasoning_content = (
+                        assembled_choice.message.reasoning_content or ""
+                    ) + delta.reasoning_content
 
                 if delta.refusal is not None:
-                    if assembled_choice.message.refusal is None:
-                        assembled_choice.message.refusal = delta.refusal
-                    else:
-                        assembled_choice.message.refusal += delta.refusal
+                    assembled_choice.message.refusal = (
+                        assembled_choice.message.refusal or ""
+                    ) + delta.refusal
 
                 if delta.tool_calls is not None:
                     if assembled_choice.message.tool_calls is None:
                         assembled_choice.message.tool_calls = []
 
                     for tool_call in delta.tool_calls:
-                        if tool_call.index == len(assembled_choice.message.tool_calls):
-                            # TODO: check if type != "function"
-                            assembled_choice.message.tool_calls.append(
-                                ChatCompletionMessageFunctionToolCall(
-                                    id="",
-                                    function=OAIFunction(arguments="", name=""),
-                                    type="function",
-                                )
+                        try:
+                            assembled_tool_call = cast(
+                                ChatCompletionMessageFunctionToolCall,
+                                assembled_choice.message.tool_calls[tool_call.index],
+                            )
+                        except IndexError:
+                            if tool_call.index != len(
+                                assembled_choice.message.tool_calls
+                            ):
+                                msg = f"tool_call index is out of order: {tool_call.index}"
+                                raise ValueError(msg)
+
+                            assembled_tool_call = ChatCompletionMessageFunctionToolCall(
+                                id="",
+                                function=OAIFunction(arguments="", name=""),
+                                type="function",
                             )
 
-                        assembled_tool_call = cast(
-                            ChatCompletionMessageFunctionToolCall,
-                            assembled_choice.message.tool_calls[tool_call.index],
-                        )
+                            assembled_choice.message.tool_calls.append(
+                                assembled_tool_call
+                            )
 
                         if tool_call.id is not None:
                             assembled_tool_call.id += tool_call.id
@@ -190,48 +204,14 @@ class OpenAIContentview(contentviews.Contentview):
                                 )
 
                         if tool_call.type is not None:
+                            if tool_call.type != "function":
+                                msg = f"unexpected tool_call type: {tool_call.type}"
+                                raise ValueError(msg)
+
                             assembled_tool_call.type = tool_call.type
 
-            if len(chunk.choices) > 0:
-                first_choice = chunk.choices[0]
-                try:
-                    delta = LlamaCppChoiceDelta.model_validate(
-                        first_choice.delta.model_dump()
-                    )
-
-                    if delta.role is not None:
-                        item = {
-                            "role": delta.role,
-                            "content": [],
-                            "reasoning_content": [],
-                            "tool_calls": [],
-                        }
-                        contents.append(item)
-
-                    if delta.content is not None:
-                        contents[-1]["content"].append(delta.content)
-
-                    if delta.reasoning_content is not None:
-                        contents[-1]["reasoning_content"].append(
-                            delta.reasoning_content
-                        )
-
-                    if delta.tool_calls is not None:
-                        first_tool_call = delta.tool_calls[0]
-                        if first_tool_call.id is not None:
-                            contents[-1]["tool_calls"].append(
-                                f"{first_tool_call.id}: {first_tool_call.function.name} {first_tool_call.function.arguments}"
-                            )
-                        else:
-                            contents[-1]["tool_calls"].append(
-                                first_tool_call.function.arguments
-                            )
-
-                except Exception as e:
-                    return str(e)
-
         out = {
-            "choices": [v.model_dump(exclude_unset=True) for k, v in choices.items()],
+            "choices": [v.model_dump(exclude_unset=True) for v in choices],
             "chunks": chunks,
         }
 
