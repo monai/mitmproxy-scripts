@@ -6,9 +6,14 @@ dependencies = []
 
 [dependency-groups]
 dev = [
+    "httpx>=0.28.1",
     "jinja2>=3.1.6",
     "mitmproxy>=12.2.0",
     "openai>=2.8.1",
     "pydantic>=2.12.4",
     "pyyaml>=6.0.3",
+    "rich>=14.2.0",
 ]
+
+[project.scripts]
+oai = "cmd.oai:main"
