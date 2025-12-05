@@ -90,6 +90,14 @@ class LlamaCppChoice(Choice):
     message: LlamaCppChatCompletionMessage
 
 
+def strftime_now(format_str: str) -> str:
+    return datetime.datetime.now().strftime(format_str)
+
+
+def raise_exception(msg: str) -> None:
+    raise TemplateError(msg)
+
+
 class OpenAIContentview(contentviews.Contentview):
     @property
     def name(self) -> str:
@@ -97,6 +105,20 @@ class OpenAIContentview(contentviews.Contentview):
 
     def prettify_request(self, data: bytes, flow: HTTPFlow, request: Request) -> str:
         chat_completion_request = ChatCompletionsRequest.model_validate_json(data)
+
+        if ctx.options.jinja:
+            request_data = chat_completion_request.model_dump()
+
+            env = Environment(
+                loader=FileSystemLoader(Path.cwd()), autoescape=select_autoescape()
+            )
+
+            env.globals["strftime_now"] = strftime_now
+            env.globals["raise_exception"] = raise_exception
+
+            template = env.get_template(ctx.options.jinja)
+
+            return template.render(messages=request_data["messages"])
 
         out = yaml.dump(
             chat_completion_request.model_dump(),
@@ -262,50 +284,6 @@ class OpenAIContentview(contentviews.Contentview):
             return 2
 
         return 0
-
-
-def strftime_now(format_str: str) -> str:
-    return datetime.datetime.now().strftime(format_str)
-
-
-def raise_exception(msg: str) -> None:
-    raise TemplateError(msg)
-
-
-# class LCChatCompletionsRequestJinja(contentviews.Contentview):
-#     name = "chat completions request jinja"
-
-#     def prettify(self, data: bytes, metadata: contentviews.Metadata) -> str:
-#         request = ChatCompletionsRequest.model_validate_json(data)
-
-#         request_data = request.model_dump()
-
-#         env = Environment(
-#             loader=FileSystemLoader(Path.cwd()), autoescape=select_autoescape()
-#         )
-
-#         env.globals["strftime_now"] = strftime_now
-#         env.globals["raise_exception"] = raise_exception
-
-#         template = env.get_template(ctx.options.jinja)
-
-#         return template.render(messages=request_data["messages"])
-
-#     def render_priority(self, data: bytes, metadata: contentviews.Metadata) -> float:
-#         if not isinstance(metadata.flow, HTTPFlow):
-#             return 0
-
-#         if not isinstance(metadata.http_message, Request):
-#             return 0
-
-#         if (
-#             metadata.content_type == "application/json"
-#             and metadata.flow.request.path.endswith("/v1/chat/completions")
-#             and ctx.options.jinja
-#         ):
-#             return 3
-#         else:
-#             return 0
 
 
 class LlamaCpp:
