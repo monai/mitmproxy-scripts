@@ -1,7 +1,7 @@
 import datetime
 import textwrap
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import yaml
 from httpx import Response as XResponse
@@ -10,7 +10,7 @@ from jinja2.exceptions import TemplateError
 from mitmproxy import contentviews, ctx
 from mitmproxy.http import HTTPFlow, Request, Response
 from openai import OpenAI, Stream
-from openai.types.chat.chat_completion import Choice
+from openai.types.chat.chat_completion import Choice, ChatCompletion
 from openai.types.chat.chat_completion_chunk import ChatCompletionChunk, ChoiceDelta
 from openai.types.chat.chat_completion_message import ChatCompletionMessage
 from openai.types.chat.chat_completion_message_function_tool_call import (
@@ -73,8 +73,8 @@ class Tool(BaseModel):
 class ChatCompletionsRequest(BaseModel):
     messages: list[Message]
     model: str
-    temperature: float
-    top_p: float
+    temperature: float | None = None
+    top_p: float | None = None
     tools: list[dict[str, Any]]
 
 
@@ -103,12 +103,15 @@ class OpenAIContentview(contentviews.Contentview):
     def name(self) -> str:
         return "OpenAI"
 
+    @property
+    def syntax_highlight(self) -> Literal["yaml"]:
+        return "yaml"
+
     def prettify_request(self, data: bytes, flow: HTTPFlow, request: Request) -> str:
         chat_completion_request = ChatCompletionsRequest.model_validate_json(data)
+        request_data = chat_completion_request.model_dump(exclude_unset=True)
 
         if ctx.options.jinja:
-            request_data = chat_completion_request.model_dump()
-
             env = Environment(
                 loader=FileSystemLoader(Path.cwd()), autoescape=select_autoescape()
             )
@@ -121,7 +124,7 @@ class OpenAIContentview(contentviews.Contentview):
             return template.render(messages=request_data["messages"])
 
         out = yaml.dump(
-            chat_completion_request.model_dump(),
+            request_data,
             Dumper=MyDumper,
             sort_keys=False,
             allow_unicode=True,
@@ -130,7 +133,17 @@ class OpenAIContentview(contentviews.Contentview):
         return out
 
     def prettify_response(self, data: bytes, flow: HTTPFlow, response: Response) -> str:
-        return "response"
+        out = ChatCompletion.model_validate_json(data)
+        response_data = out.model_dump(exclude_unset=True)
+
+        res = yaml.dump(
+            response_data,
+            Dumper=MyDumper,
+            sort_keys=False,
+            allow_unicode=True,
+        )
+
+        return res
 
     def prettify_streaming_response(
         self, data: bytes, flow: HTTPFlow, response: Response
@@ -304,7 +317,6 @@ class LlamaCpp:
             default="",
             help="Use jinja template for chat",
         )
-
 
 contentviews.add(OpenAIContentview)
 
