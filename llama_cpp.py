@@ -1,16 +1,17 @@
 import datetime
+import json
 import textwrap
 from pathlib import Path
 from typing import Any, Literal, cast
 
+import httpx
 import yaml
-from httpx import Response as XResponse
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from jinja2.exceptions import TemplateError
 from mitmproxy import contentviews, ctx
 from mitmproxy.http import HTTPFlow, Request, Response
 from openai import OpenAI, Stream
-from openai.types.chat.chat_completion import Choice, ChatCompletion
+from openai.types.chat.chat_completion import ChatCompletion, Choice
 from openai.types.chat.chat_completion_chunk import ChatCompletionChunk, ChoiceDelta
 from openai.types.chat.chat_completion_message import ChatCompletionMessage
 from openai.types.chat.chat_completion_message_function_tool_call import (
@@ -53,6 +54,13 @@ def str_presenter(dumper: yaml.Dumper, data: str):
 
 yaml.add_representer(str, str_presenter)
 
+def yaml_dump(data: Any) -> str:
+    return yaml.dump(
+        data,
+        Dumper=MyDumper,
+        sort_keys=False,
+        allow_unicode=True,
+    )
 
 class Message(BaseModel):
     role: str
@@ -107,7 +115,9 @@ class OpenAIContentview(contentviews.Contentview):
     def syntax_highlight(self) -> Literal["yaml"]:
         return "yaml"
 
-    def prettify_request(self, data: bytes, flow: HTTPFlow, request: Request) -> str:
+    def prettify_request(
+        self, data: bytes, flow: HTTPFlow, request: httpx.Request
+    ) -> str:
         chat_completion_request = ChatCompletionsRequest.model_validate_json(data)
         request_data = chat_completion_request.model_dump(exclude_unset=True)
 
@@ -121,36 +131,23 @@ class OpenAIContentview(contentviews.Contentview):
 
             template = env.get_template(ctx.options.jinja)
 
-            return template.render(messages=request_data["messages"])
+            return template.render(**request_data)
 
-        out = yaml.dump(
-            request_data,
-            Dumper=MyDumper,
-            sort_keys=False,
-            allow_unicode=True,
-        )
+        return yaml_dump(request_data)
 
-        return out
-
-    def prettify_response(self, data: bytes, flow: HTTPFlow, response: Response) -> str:
+    def prettify_response(
+        self, data: bytes, flow: HTTPFlow, response: httpx.Response
+    ) -> str:
         out = ChatCompletion.model_validate_json(data)
         response_data = out.model_dump(exclude_unset=True)
 
-        res = yaml.dump(
-            response_data,
-            Dumper=MyDumper,
-            sort_keys=False,
-            allow_unicode=True,
-        )
-
-        return res
+        return yaml_dump(response_data)
 
     def prettify_streaming_response(
-        self, data: bytes, flow: HTTPFlow, response: Response
+        self, data: bytes, flow: HTTPFlow, response: httpx.Response
     ) -> str:
         openai = OpenAI(api_key="dummy")
-        x_response = XResponse(response.status_code, content=data)
-        stream = Stream(cast_to=ChatCompletionChunk, response=x_response, client=openai)
+        stream = Stream(cast_to=ChatCompletionChunk, response=response, client=openai)
 
         chunks = []
         choices: list[LlamaCppChoice] = []
@@ -267,19 +264,37 @@ class OpenAIContentview(contentviews.Contentview):
             if metadata.http_message is None:
                 raise ValueError("http_message is None")
 
+            request = httpx.Request(
+                metadata.flow.request.method, metadata.flow.request.url
+            )
+
             if isinstance(metadata.http_message, Request):
-                return self.prettify_request(data, metadata.flow, metadata.http_message)
+                return self.prettify_request(data, metadata.flow, request)
 
             if isinstance(metadata.http_message, Response):
+                response = httpx.Response(
+                    metadata.http_message.status_code, content=data, request=request
+                )
+
+                try:
+                    response.raise_for_status()
+                except httpx.HTTPStatusError:
+                    try:
+                        error_data = json.loads(data)
+
+                        return yaml_dump(error_data)
+                    except json.JSONDecodeError:
+                        openai = OpenAI(api_key="dummy")
+
+                        raise openai._make_status_error_from_response(response)
+
                 if metadata.content_type == "text/event-stream":
                     return self.prettify_streaming_response(
-                        data, metadata.flow, metadata.http_message
+                        data, metadata.flow, response
                     )
 
                 if metadata.content_type == "application/json":
-                    return self.prettify_response(
-                        data, metadata.flow, metadata.http_message
-                    )
+                    return self.prettify_response(data, metadata.flow, response)
 
             return data.decode("utf-8")
 
@@ -317,6 +332,7 @@ class LlamaCpp:
             default="",
             help="Use jinja template for chat",
         )
+
 
 contentviews.add(OpenAIContentview)
 
