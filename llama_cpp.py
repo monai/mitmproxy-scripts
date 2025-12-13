@@ -64,7 +64,7 @@ def yaml_dump(data: Any) -> str:
 
 class Message(BaseModel):
     role: str
-    content: str
+    content: str | None = None
 
 
 class Function(BaseModel):
