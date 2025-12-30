@@ -2,7 +2,7 @@ import datetime
 import json
 import textwrap
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Annotated, Any, Literal, cast
 
 import httpx
 import yaml
@@ -20,7 +20,7 @@ from openai.types.chat.chat_completion_message_function_tool_call import (
 from openai.types.chat.chat_completion_message_function_tool_call import (
     Function as OAIFunction,
 )
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class MyEmitter(yaml.emitter.Emitter):
@@ -54,6 +54,7 @@ def str_presenter(dumper: yaml.Dumper, data: str):
 
 yaml.add_representer(str, str_presenter)
 
+
 def yaml_dump(data: Any) -> str:
     return yaml.dump(
         data,
@@ -62,9 +63,55 @@ def yaml_dump(data: Any) -> str:
         allow_unicode=True,
     )
 
+
+class ChatCompletionContentPartTextParam(BaseModel):
+    text: str
+    type: Literal["text"]
+
+
+class ImageURL(BaseModel):
+    url: str
+    detail: Literal["auto", "low", "high"] | None = None
+
+
+class ChatCompletionContentPartImageParam(BaseModel):
+    image_url: ImageURL
+    type: Literal["image_url"]
+
+
+class InputAudio(BaseModel):
+    data: str
+    format: Literal["wav", "mp3"]
+
+
+class ChatCompletionContentPartInputAudioParam(BaseModel):
+    input_audio: InputAudio
+    type: Literal["input_audio"]
+
+
+class FileFile(BaseModel):
+    file_data: str | None = None
+    file_id: str | None = None
+    filename: str | None = None
+
+
+class File(BaseModel):
+    file: FileFile
+    type: Literal["file"]
+
+
+ChatCompletionContentPartParam = Annotated[
+    ChatCompletionContentPartTextParam
+    | ChatCompletionContentPartImageParam
+    | ChatCompletionContentPartInputAudioParam
+    | File,
+    Field(discriminator="type"),
+]
+
+
 class Message(BaseModel):
     role: str
-    content: str | None = None
+    content: str | list[ChatCompletionContentPartParam] | None = None
 
 
 class Function(BaseModel):
