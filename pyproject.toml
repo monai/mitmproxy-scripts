@@ -1,5 +1,5 @@
 [project]
-name = "mitmproxy-openai"
+name = "mitmproxy-scripts"
 version = "0.1.0"
 requires-python = ">=3.13"
 dependencies = []
@@ -14,6 +14,3 @@ dev = [
     "pyyaml>=6.0.3",
     "rich>=14.2.0",
 ]
-
-[project.scripts]
-oai = "cmd.oai:main"
