@@ -2,7 +2,7 @@ import json
 import logging
 from typing import List
 
-from mitmproxy import http, ctx
+from mitmproxy import ctx, http
 
 logger = logging.getLogger(__name__)
 

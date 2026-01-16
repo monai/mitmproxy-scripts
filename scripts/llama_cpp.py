@@ -141,8 +141,8 @@ class LlamaCppChatCompletionMessage(ChatCompletionMessage):
     reasoning_content: str | None = None
 
 
-class LlamaCppChoice(Choice):
-    message: LlamaCppChatCompletionMessage
+class LlamaCppChoice(Choice):  # type: ignore[misc]
+    message: LlamaCppChatCompletionMessage  # type: ignore[misc]
 
 
 def strftime_now(format_str: str) -> str:
