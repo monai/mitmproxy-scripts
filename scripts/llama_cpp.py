@@ -130,7 +130,7 @@ class ChatCompletionsRequest(BaseModel):
     model: str
     temperature: float | None = None
     top_p: float | None = None
-    tools: list[dict[str, Any]]
+    tools: list[dict[str, Any]] | None = None
 
 
 class LlamaCppChoiceDelta(ChoiceDelta):
