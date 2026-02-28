@@ -10,7 +10,7 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 from jinja2.exceptions import TemplateError
 from mitmproxy import contentviews, ctx
 from mitmproxy.http import HTTPFlow, Request, Response
-from openai import OpenAI, Stream
+from openai import APIError, OpenAI, Stream
 from openai.types.chat.chat_completion import ChatCompletion, Choice
 from openai.types.chat.chat_completion_chunk import ChatCompletionChunk, ChoiceDelta
 from openai.types.chat.chat_completion_message import ChatCompletionMessage
@@ -198,101 +198,117 @@ class OpenAIContentview(contentviews.Contentview):
 
         chunks = []
         choices: list[LlamaCppChoice] = []
+        error: Exception | None = None
 
-        for chunk in stream:
-            chunks.append(chunk.model_dump(exclude_unset=True))
+        try:
+            for chunk in stream:
+                chunks.append(chunk.model_dump(exclude_unset=True))
 
-            for choice in chunk.choices:
-                try:
-                    assembled_choice = choices[choice.index]
-                except IndexError:
-                    if choice.index != len(choices):
-                        msg = f"choice index is out of order: {choice.index}"
-                        raise ValueError(msg)
+                for choice in chunk.choices:
+                    try:
+                        assembled_choice = choices[choice.index]
+                    except IndexError:
+                        if choice.index != len(choices):
+                            msg = f"choice index is out of order: {choice.index}"
+                            raise ValueError(msg)
 
-                    if choice.delta.role != "assistant":
-                        msg = f"unexpected role: {choice.delta.role}"
-                        raise ValueError(msg)
+                        if choice.delta.role != "assistant":
+                            msg = f"unexpected role: {choice.delta.role}"
+                            raise ValueError(msg)
 
-                    message = LlamaCppChatCompletionMessage(role="assistant")
-                    assembled_choice = LlamaCppChoice(
-                        finish_reason="stop", index=choice.index, message=message
+                        message = LlamaCppChatCompletionMessage(role="assistant")
+                        assembled_choice = LlamaCppChoice(
+                            finish_reason="stop", index=choice.index, message=message
+                        )
+
+                        choices.append(assembled_choice)
+
+                    if choice.finish_reason is not None:
+                        assembled_choice.finish_reason = choice.finish_reason
+
+                    delta = LlamaCppChoiceDelta.model_validate(
+                        choice.delta.model_dump()
                     )
 
-                    choices.append(assembled_choice)
+                    if delta.content is not None:
+                        assembled_choice.message.content = (
+                            assembled_choice.message.content or ""
+                        ) + delta.content
 
-                if choice.finish_reason is not None:
-                    assembled_choice.finish_reason = choice.finish_reason
+                    if delta.reasoning_content is not None:
+                        assembled_choice.message.reasoning_content = (
+                            assembled_choice.message.reasoning_content or ""
+                        ) + delta.reasoning_content
 
-                delta = LlamaCppChoiceDelta.model_validate(choice.delta.model_dump())
+                    if delta.refusal is not None:
+                        assembled_choice.message.refusal = (
+                            assembled_choice.message.refusal or ""
+                        ) + delta.refusal
 
-                if delta.content is not None:
-                    assembled_choice.message.content = (
-                        assembled_choice.message.content or ""
-                    ) + delta.content
+                    if delta.tool_calls is not None:
+                        if assembled_choice.message.tool_calls is None:
+                            assembled_choice.message.tool_calls = []
 
-                if delta.reasoning_content is not None:
-                    assembled_choice.message.reasoning_content = (
-                        assembled_choice.message.reasoning_content or ""
-                    ) + delta.reasoning_content
+                        for tool_call in delta.tool_calls:
+                            try:
+                                assembled_tool_call = cast(
+                                    ChatCompletionMessageFunctionToolCall,
+                                    assembled_choice.message.tool_calls[
+                                        tool_call.index
+                                    ],
+                                )
+                            except IndexError:
+                                if tool_call.index != len(
+                                    assembled_choice.message.tool_calls
+                                ):
+                                    msg = f"tool_call index is out of order: {tool_call.index}"
+                                    raise ValueError(msg)
 
-                if delta.refusal is not None:
-                    assembled_choice.message.refusal = (
-                        assembled_choice.message.refusal or ""
-                    ) + delta.refusal
-
-                if delta.tool_calls is not None:
-                    if assembled_choice.message.tool_calls is None:
-                        assembled_choice.message.tool_calls = []
-
-                    for tool_call in delta.tool_calls:
-                        try:
-                            assembled_tool_call = cast(
-                                ChatCompletionMessageFunctionToolCall,
-                                assembled_choice.message.tool_calls[tool_call.index],
-                            )
-                        except IndexError:
-                            if tool_call.index != len(
-                                assembled_choice.message.tool_calls
-                            ):
-                                msg = f"tool_call index is out of order: {tool_call.index}"
-                                raise ValueError(msg)
-
-                            assembled_tool_call = ChatCompletionMessageFunctionToolCall(
-                                id="",
-                                function=OAIFunction(arguments="", name=""),
-                                type="function",
-                            )
-
-                            assembled_choice.message.tool_calls.append(
-                                assembled_tool_call
-                            )
-
-                        if tool_call.id is not None:
-                            assembled_tool_call.id += tool_call.id
-
-                        if tool_call.function is not None:
-                            if tool_call.function.arguments is not None:
-                                assembled_tool_call.function.arguments += (
-                                    tool_call.function.arguments
+                                assembled_tool_call = (
+                                    ChatCompletionMessageFunctionToolCall(
+                                        id="",
+                                        function=OAIFunction(arguments="", name=""),
+                                        type="function",
+                                    )
                                 )
 
-                            if tool_call.function.name is not None:
-                                assembled_tool_call.function.name += (
-                                    tool_call.function.name
+                                assembled_choice.message.tool_calls.append(
+                                    assembled_tool_call
                                 )
 
-                        if tool_call.type is not None:
-                            if tool_call.type != "function":
-                                msg = f"unexpected tool_call type: {tool_call.type}"
-                                raise ValueError(msg)
+                            if tool_call.id is not None:
+                                assembled_tool_call.id += tool_call.id
 
-                            assembled_tool_call.type = tool_call.type
+                            if tool_call.function is not None:
+                                if tool_call.function.arguments is not None:
+                                    assembled_tool_call.function.arguments += (
+                                        tool_call.function.arguments
+                                    )
+
+                                if tool_call.function.name is not None:
+                                    assembled_tool_call.function.name += (
+                                        tool_call.function.name
+                                    )
+
+                            if tool_call.type is not None:
+                                if tool_call.type != "function":
+                                    msg = f"unexpected tool_call type: {tool_call.type}"
+                                    raise ValueError(msg)
+
+                                assembled_tool_call.type = tool_call.type
+        except APIError as e:
+            error = e
 
         out = {
             "choices": [v.model_dump(exclude_unset=True) for v in choices],
             "chunks": chunks,
         }
+
+        if error:
+            out = {
+                "error": str(error),
+                **out,
+            }
 
         res = yaml.dump(
             out,
