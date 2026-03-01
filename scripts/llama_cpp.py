@@ -112,6 +112,7 @@ ChatCompletionContentPartParam = Annotated[
 class Message(BaseModel):
     role: str
     content: str | list[ChatCompletionContentPartParam] | None = None
+    tool_calls: list[ChatCompletionMessageFunctionToolCall] | None = None
 
 
 class Function(BaseModel):
